@@ -1,0 +1,14 @@
+{
+  "name": "whiteboard-server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^5.x",
+    "cors": "^2.x",
+    "dotenv": "^16.x"
+  },
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js"
+  }
+}
