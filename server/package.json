@@ -3,9 +3,10 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "express": "^5.x",
     "cors": "^2.x",
-    "dotenv": "^16.x"
+    "dotenv": "^16.x",
+    "express": "^5.x",
+    "socket.io": "^4.x"
   },
   "scripts": {
     "dev": "node --watch index.js",
