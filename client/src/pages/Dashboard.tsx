@@ -1,3 +1,4 @@
+import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { useBoard } from "../hooks/useBoard";
@@ -5,13 +6,23 @@ import { useBoard } from "../hooks/useBoard";
 export default function Dashboard() {
   const { user, loading: authLoading, signOut } = useAuth();
   const { boards, loading, error, createBoard } = useBoard();
+  const [name, setName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
 
-  async function handleCreateBoard() {
-    const name = window.prompt("Board name");
-    if (!name) return;
+  async function handleCreateBoard(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
 
-    const board = await createBoard(name);
-    window.location.assign(`/board/${board.id}`);
+    setCreateError(null);
+    try {
+      const board = await createBoard(trimmed);
+      window.location.assign(`/board/${board.id}`);
+    } catch (err) {
+      setCreateError(
+        err instanceof Error ? err.message : "Could not create board",
+      );
+    }
   }
 
   if (authLoading || loading) {
@@ -36,10 +47,19 @@ export default function Dashboard() {
         )}
       </header>
 
-      <button type="button" onClick={() => void handleCreateBoard()}>
-        New board
-      </button>
+      <form onSubmit={handleCreateBoard}>
+        <label>
+          Board name
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            required
+          />
+        </label>
+        <button type="submit">New board</button>
+      </form>
 
+      {createError && <p role="alert">{createError}</p>}
       {error && <p>{error}</p>}
 
       <ul>
