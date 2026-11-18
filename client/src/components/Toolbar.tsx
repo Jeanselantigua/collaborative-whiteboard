@@ -9,6 +9,7 @@ type Props = {
   onSizeChange: (size: number) => void;
   onUndo: () => void;
   onClear: () => void;
+  onSave: () => void;
 };
 
 export default function Toolbar({
@@ -20,6 +21,7 @@ export default function Toolbar({
   onSizeChange,
   onUndo,
   onClear,
+  onSave,
 }: Props) {
   return (
     <div role="toolbar" aria-label="Drawing tools">
@@ -64,6 +66,9 @@ export default function Toolbar({
       </button>
       <button type="button" onClick={onClear}>
         Clear
+      </button>
+      <button type="button" onClick={onSave}>
+        Save
       </button>
     </div>
   );

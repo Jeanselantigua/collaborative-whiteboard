@@ -18,7 +18,11 @@ export type Stroke = {
 };
 
 // "clear" sits in the same list as strokes, so undo can take it back too
-type Entry = Stroke | "clear";
+export type Entry = Stroke | "clear";
+
+// An entry plus the id of its row in the database. The id is made here, not
+// by the database, so undo can name the row without waiting for the save.
+export type Saved<T extends Entry = Entry> = { id: string; data: T };
 
 export type CanvasHandle = {
   undo: () => void;
@@ -64,18 +68,18 @@ function drawStroke(
 }
 
 // Rebuilds the picture from the list. Needed whenever pixels are lost or stale.
-function redraw(canvas: HTMLCanvasElement, history: Entry[]) {
+function redraw(canvas: HTMLCanvasElement, history: Saved[]) {
   const ctx = canvas.getContext("2d")!;
   // +1 covers rounding when the screen's pixel ratio is fractional
   const wipe = () =>
     ctx.clearRect(0, 0, canvas.clientWidth + 1, canvas.clientHeight + 1);
 
   wipe();
-  for (const entry of history) {
-    if (entry === "clear") {
+  for (const { data } of history) {
+    if (data === "clear") {
       wipe();
     } else {
-      drawStroke(ctx, entry);
+      drawStroke(ctx, data);
     }
   }
 }
@@ -84,16 +88,20 @@ type Props = {
   tool: Tool;
   color: string;
   size: number;
+  // The saved drawing to start from. Read once, when the canvas appears.
+  initial: Saved[];
+  onSave: (entry: Saved) => void;
+  onRemove: (id: string) => void;
 };
 
 const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
-  { tool, color, size },
+  { tool, color, size, initial, onSave, onRemove },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // Refs, not state: a pointer move must not re-render React
-  const historyRef = useRef<Entry[]>([]);
-  const currentRef = useRef<Stroke | null>(null);
+  const historyRef = useRef<Saved[]>([...initial]);
+  const currentRef = useRef<Saved<Stroke> | null>(null);
 
   // Lets the parent call undo() and clear() from toolbar buttons
   useImperativeHandle(
@@ -101,21 +109,25 @@ const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     () => ({
       undo() {
         currentRef.current = null;
-        historyRef.current.pop();
+        const removed = historyRef.current.pop();
+        if (!removed) return;
         redraw(canvasRef.current!, historyRef.current);
+        onRemove(removed.id);
       },
       clear() {
         const history = historyRef.current;
         const last = history[history.length - 1];
         // Nothing to clear, so don't add an entry that undo would have to eat
-        if (!last || last === "clear") return;
+        if (!last || last.data === "clear") return;
 
         currentRef.current = null;
-        history.push("clear");
+        const entry: Saved = { id: crypto.randomUUID(), data: "clear" };
+        history.push(entry);
         redraw(canvasRef.current!, history);
+        onSave(entry);
       },
     }),
-    [],
+    [onSave, onRemove],
   );
 
   useEffect(() => {
@@ -147,13 +159,14 @@ const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       size,
       points: [{ x: event.nativeEvent.offsetX, y: event.nativeEvent.offsetY }],
     };
-    historyRef.current.push(stroke);
-    currentRef.current = stroke;
+    const entry = { id: crypto.randomUUID(), data: stroke };
+    historyRef.current.push(entry);
+    currentRef.current = entry;
     drawStroke(event.currentTarget.getContext("2d")!, stroke);
   }
 
   function handlePointerMove(event: PointerEvent<HTMLCanvasElement>) {
-    const stroke = currentRef.current;
+    const stroke = currentRef.current?.data;
     if (!stroke || !event.isPrimary) return;
 
     stroke.points.push({
@@ -171,16 +184,18 @@ const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   }
 
   function handlePointerUp(event: PointerEvent<HTMLCanvasElement>) {
-    const stroke = currentRef.current;
-    if (!stroke || !event.isPrimary) return;
+    const entry = currentRef.current;
+    if (!entry || !event.isPrimary) return;
 
     currentRef.current = null;
     // Only the last half-segment is still missing
     drawStroke(
       event.currentTarget.getContext("2d")!,
-      stroke,
-      stroke.points.length,
+      entry.data,
+      entry.data.points.length,
     );
+    // Saved once, when the stroke is finished, not on every point
+    onSave(entry);
   }
 
   return (

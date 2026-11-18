@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { Stroke } from "../client/src/components/Canvas";
 
 const BLANK = [0, 0, 0, 0];
 const BLACK = [0, 0, 0, 255];
@@ -6,24 +7,60 @@ const RED = [255, 0, 0, 255];
 
 type Spot = [x: number, y: number];
 
-test.beforeEach(async ({ page }) => {
-  // The board record comes from Supabase. Answer that request here so the
-  // tests need no database and never write to the real one.
-  await page.route("**/rest/v1/Board*", (route) =>
-    route.fulfill({
-      json: { id: "test", name: "Test board", createdAt: "2026-01-01" },
-    }),
-  );
-  await page.goto("/board/test");
-  // Wait until the canvas exists and has sized its pixel grid to the page
-  await page.waitForFunction(() => {
+// Stands in for the "Stroke" table in Supabase
+let saved: { id: string; boardId?: string; data: unknown }[];
+
+// Wait until the canvas exists and has sized its pixel grid to the page
+function canvasReady(page: Page) {
+  return page.waitForFunction(() => {
     const canvas = document.querySelector("canvas");
     return (
       canvas !== null &&
       canvas.width === Math.round(canvas.clientWidth * window.devicePixelRatio)
     );
   });
+}
+
+test.beforeEach(async ({ page }) => {
+  // The board and its drawing come from Supabase. Answer those requests here
+  // so the tests need no database and never write to the real one.
+  await page.route("**/rest/v1/Board*", (route) =>
+    route.fulfill({
+      json: { id: "test", name: "Test board", createdAt: "2026-01-01" },
+    }),
+  );
+  saved = [];
+  await page.route("**/rest/v1/Stroke*", (route) => {
+    const request = route.request();
+    const query = new URL(request.url()).searchParams;
+    if (request.method() === "POST") {
+      saved.push(request.postDataJSON());
+      return route.fulfill({ status: 201 });
+    }
+    if (request.method() === "DELETE") {
+      // The row to delete arrives as "id=eq.<id>"
+      const id = query.get("id")!.replace("eq.", "");
+      saved = saved.filter((row) => row.id !== id);
+      return route.fulfill({ status: 204 });
+    }
+    // Like Supabase, hand out at most 1000 rows per request
+    const offset = Number(query.get("offset") ?? 0);
+    const limit = Math.min(Number(query.get("limit") ?? 1000), 1000);
+    return route.fulfill({ json: saved.slice(offset, offset + limit) });
+  });
+  await page.goto("/board/test");
+  await canvasReady(page);
 });
+
+// What the stand-in table holds, in order: "clear", or for a stroke the
+// height it starts at
+function savedRows() {
+  return saved.map((row) =>
+    row.data === "clear"
+      ? "clear"
+      : Math.round((row.data as Stroke).points[0].y),
+  );
+}
 
 // Turns a spot on the canvas into a spot on the page
 async function onPage(page: Page, [x, y]: Spot): Promise<Spot> {
@@ -112,6 +149,113 @@ test("eraser, undo and clear", async ({ page }) => {
 
   await page.getByRole("button", { name: "Undo" }).click();
   expect(await pixel(page, [200, 100])).toEqual(BLANK);
+});
+
+test("the drawing, a clear and an undo all survive a reload", async ({
+  page,
+}) => {
+  await drag(page, [100, 100], [300, 100]);
+  await drag(page, [100, 200], [300, 200]);
+  await page.getByRole("button", { name: "Undo" }).click();
+  await drag(page, [100, 300], [300, 300]);
+  // Reloading too early would cut off a save that is still on its way
+  await expect.poll(savedRows).toEqual([100, 300]);
+  expect(saved[0]).toMatchObject({ boardId: "test", data: { tool: "pen" } });
+
+  await page.reload();
+  await canvasReady(page);
+  expect(await pixel(page, [200, 100])).toEqual(BLACK);
+  expect(await pixel(page, [200, 200])).toEqual(BLANK);
+  expect(await pixel(page, [200, 300])).toEqual(BLACK);
+
+  await page.getByRole("button", { name: "Clear" }).click();
+  await expect.poll(savedRows).toEqual([100, 300, "clear"]);
+  await page.reload();
+  await canvasReady(page);
+  expect(await pixel(page, [200, 100])).toEqual(BLANK);
+
+  // Undo still works on entries that were loaded, not drawn in this visit
+  await page.getByRole("button", { name: "Undo" }).click();
+  expect(await pixel(page, [200, 100])).toEqual(BLACK);
+  await expect.poll(savedRows).toEqual([100, 300]);
+});
+
+test("an undo right after a stroke does not overtake its save", async ({
+  page,
+}) => {
+  // Slow down saves only, so the delete would arrive first if both were
+  // sent at once
+  await page.route("**/rest/v1/Stroke*", async (route) => {
+    if (route.request().method() === "POST") {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    await route.fallback();
+  });
+  const bothAnswered = Promise.all(
+    ["POST", "DELETE"].map((method) =>
+      page.waitForResponse(
+        (response) =>
+          response.url().includes("/rest/v1/Stroke") &&
+          response.request().method() === method,
+      ),
+    ),
+  );
+
+  await drag(page, [100, 100], [300, 100]);
+  await page.getByRole("button", { name: "Undo" }).click();
+  await bothAnswered;
+  expect(saved).toEqual([]);
+});
+
+test("a long history loads in full, and broken rows are skipped", async ({
+  page,
+}) => {
+  // 1001 rows: one more than a single request returns
+  saved = [
+    ...Array.from({ length: 999 }, (_, i) => ({ id: `c${i}`, data: "clear" })),
+    { id: "broken", data: { tool: "pen" } },
+    {
+      id: "line",
+      data: {
+        tool: "pen",
+        color: "#000000",
+        size: 4,
+        points: [
+          { x: 100, y: 100 },
+          { x: 300, y: 100 },
+        ],
+      },
+    },
+  ];
+  await page.reload();
+  await canvasReady(page);
+  expect(await pixel(page, [200, 100])).toEqual(BLACK);
+});
+
+test("a failed save is shown, and the Save button sends it again", async ({
+  page,
+}) => {
+  let down = true;
+  await page.route("**/rest/v1/Stroke*", (route) =>
+    down
+      ? route.fulfill({ status: 500, json: { message: "database is down" } })
+      : route.fallback(),
+  );
+  await drag(page, [100, 100], [300, 100]);
+  await drag(page, [100, 200], [300, 200]);
+  await expect(page.getByRole("status")).toContainText(
+    "Not saved: database is down",
+  );
+  expect(saved).toEqual([]);
+  // The message did not push the canvas down: the second line is where it
+  // was drawn
+  expect(await pixel(page, [200, 200])).toEqual(BLACK);
+
+  down = false;
+  await page.getByRole("button", { name: "Save" }).click();
+  // Both strokes arrive, in the order they were drawn
+  await expect.poll(savedRows).toEqual([100, 200]);
+  await expect(page.getByRole("status")).toHaveText("Saved");
 });
 
 test("a stroke survives a window resize", async ({ page }) => {
